@@ -110,15 +110,28 @@ if uploaded_file:
 
     with tab2:
         st.write("학습 시 검증 세트를 통해 측정된 모델의 신뢰도 지표입니다.")
-        # 실제 혼동 행렬 데이터를 넣거나 예시 이미지/데이터를 시각화합니다.
-        # 여기서는 학습 시의 결과(사용자님 이미지 참조)를 재현합니다.
-        cm_data = [[19463, 1537], [1269, 19731]] 
-        fig_cm, ax_cm = plt.subplots(figsize=(6, 5))
-        sns.heatmap(cm_data, annot=True, fmt='d', cmap='RdPu', 
-                    xticklabels=['Normal', 'Cancer'], yticklabels=['Normal', 'Cancer'])
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-        st.pyplot(fig_cm)
+        
+        # 1. 컬럼을 생성하여 중간 컬럼의 너비를 조절합니다.
+        # [1, 1, 1]은 1:1:1 비율이며, 숫자를 조절해 크기를 더 줄일 수 있습니다.
+        col1, col2, col3 = st.columns([1, 1.2, 1]) 
+
+        with col2: # 가운데 칸에만 그래프를 넣습니다.
+            cm_data = [[19463, 1537], [1269, 19731]] 
+            
+            # 2. figsize도 함께 줄여주면 텍스트 비율이 더 잘 맞습니다.
+            fig_cm, ax_cm = plt.subplots(figsize=(4, 3.2)) 
+            
+            sns.heatmap(cm_data, annot=True, fmt='d', cmap='RdPu', 
+                        xticklabels=['Normal', 'Cancer'], yticklabels=['Normal', 'Cancer'],
+                        annot_kws={"size": 10}) # 글자 크기도 살짝 조절
+            
+            plt.xlabel('Predicted', fontsize=9)
+            plt.ylabel('Actual', fontsize=9)
+            plt.xticks(fontsize=8)
+            plt.yticks(fontsize=8)
+            
+            st.pyplot(fig_cm)
+            
         st.info("AUC Score: 0.9763 | Precision: 0.93 | Recall: 0.94")
 
     with tab3:
