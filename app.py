@@ -38,9 +38,13 @@ def extract_20_features(img_array):
     # A. PIL(RGB) -> OpenCV(BGR) 변환 (학습 시 cv2.imread 로직 재현)
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
-    # B. 중앙 32x32 패치 추출 (학습 시 crop 로직 재현)
+    # B. 중앙 32x32 패치 추출 (학습 시 img[32:64, 32:64] 고정 좌표 재현)
     h, w, _ = img_bgr.shape
-    center_bgr = img_bgr[h//2-16:h//2+16, w//2-16:w//2+16]
+    if h >= 64 and w >= 64:
+        center_bgr = img_bgr[32:64, 32:64]
+    else:
+        # 이미지가 64px 미만일 경우 중앙 크롭으로 대체
+        center_bgr = img_bgr[max(0,h//2-16):h//2+16, max(0,w//2-16):w//2+16]
     
     # C. 전처리용 이미지 생성
     gray = cv2.cvtColor(center_bgr, cv2.COLOR_BGR2GRAY)
@@ -87,7 +91,7 @@ def extract_20_features(img_array):
 
 # --- 3. 메인 UI 화면 구성 ---
 st.title("🔬 암 진단 AI 병리 리포트")
-st.info("이미지를 업로드하면 AI가 중앙 32x32 영역을 분석하여 암 조직 여부를 판독합니다.")
+st.info("이미지를 업로드하면 AI가 [32:64, 32:64] 영역을 분석하여 암 조직 여부를 판독합니다.")
 
 uploaded_file = st.file_uploader("조직 이미지(TIF/PNG/JPG) 업로드", type=['tif', 'tiff', 'png', 'jpg'])
 
@@ -101,8 +105,14 @@ if uploaded_file and model is not None:
     
     with col1:
         st.subheader("🖼️ 분석 이미지")
-        # 이미지가 너무 크지 않게 적절히 표시
         st.image(image, caption="Uploaded Image", use_container_width=True)
+        
+        # 크롭 영역 시각화
+        h, w = img_array.shape[:2]
+        if h >= 64 and w >= 64:
+            img_viz = img_array.copy()
+            cv2.rectangle(img_viz, (32, 32), (64, 64), (255, 0, 0), 2)
+            st.image(img_viz, caption="🔴 분석 영역 표시 [32:64, 32:64]", use_container_width=True)
 
     with col2:
         # 예측 수행
@@ -142,7 +152,6 @@ if uploaded_file and model is not None:
 
     with tab2:
         st.write("학습 시 검증 데이터를 통한 모델의 정확도 지표입니다.")
-        # 혼동 행렬을 작게 배치
         c1, c2, c3 = st.columns([1, 1.5, 1])
         with c2:
             cm_data = [[19463, 1537], [1269, 19731]] 
@@ -156,7 +165,7 @@ if uploaded_file and model is not None:
         st.info("AUC Score: 0.9763 | Precision: 0.93 | Recall: 0.94")
 
     with tab3:
-        st.write("이미지 중앙 32x32 영역에서 추출된 20개 특징의 값입니다.")
+        st.write("이미지 [32:64, 32:64] 영역에서 추출된 20개 특징의 값입니다.")
         df_display = pd.DataFrame(extracted_data, columns=FEATURE_ORDER)
         st.dataframe(df_display.T.rename(columns={0: "수치"}), use_container_width=True)
 
