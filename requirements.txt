@@ -1,11 +1,8 @@
 streamlit
-joblib
+opencv-python-headless
 numpy
 pandas
-opencv-python-headless
-pillow
-scikit-learn
+joblib
+plotly
 scikit-image
 xgboost
-matplotlib
-seaborn

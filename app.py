@@ -1,174 +1,295 @@
 import streamlit as st
-import joblib
-import numpy as np
-import pandas as pd
+
 import cv2
-import matplotlib.pyplot as plt
-import seaborn as sns
-from PIL import Image
-from skimage.feature import graycomatrix, graycoprops
 
-# --- [설정] 페이지 레이아웃 및 제목 (최상단 배치 필수) ---
-st.set_page_config(page_title="암 진단 AI 리포트", layout="wide")
+import numpy as np
 
-# --- 0. 전역 변수 설정 (모델이 기대하는 정확한 피처 순서) ---
-FEATURE_ORDER = [
-    'H_mean', 'S_mean', 'V_mean', 'G_mean', 'B_mean', 
-    'Color_Variance', 'Contrast_0', 'Contrast_45', 'Contrast_135', 
-    'Homogeneity_45', 'Homogeneity_90', 'Homogeneity_135', 
-    'Correlation_avg', 'Energy_avg', 'ASM_avg', 'Entropy_avg', 
-    'Gray_Mean_Center', 'Texture_Complexity', 'Uniformity_Score', 'Edge_Density'
-]
+import joblib
 
-# --- 1. 모델 및 스케일러 로드 ---
+import plotly.graph_objects as go
+
+from skimage.feature import local_binary_pattern, graycomatrix, graycoprops
+
+
+
+# --- 1. 특징 추출 함수 (원본 로직) ---
+
+def get_32_features(patch):
+
+    f = []
+
+    # 색상 (RGB, HSV, LAB)
+
+    for space in [None, cv2.COLOR_BGR2HSV, cv2.COLOR_BGR2LAB]:
+
+        target = patch if space is None else cv2.cvtColor(patch, space)
+
+        f.extend(np.mean(target, axis=(0,1)).tolist())
+
+        f.extend(np.std(target, axis=(0,1)).tolist())
+
+    # 질감 (GLCM)
+
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+
+    glcm = graycomatrix(gray, distances=[1], angles=[0], levels=256, symmetric=True, normed=True)
+
+    for prop in ['contrast', 'homogeneity', 'energy', 'correlation']:
+
+        f.append(graycoprops(glcm, prop)[0, 0])
+
+    # 패턴 (LBP)
+
+    lbp = local_binary_pattern(gray, P=8, R=1, method='uniform')
+
+    hist, _ = np.histogram(lbp.ravel(), bins=10, range=(0,10), density=True)
+
+    f.extend(hist.tolist())
+
+    return np.array(f, dtype=np.float32)
+
+
+
+def extract_logic_96x96(img_bgr):
+
+    tile_features = []
+
+    for y in range(0, 96, 32):
+
+        for x in range(0, 96, 32):
+
+            tile = img_bgr[y:y+32, x:x+32]
+
+            if np.mean(tile) > 240: continue 
+
+            tile_features.append(get_32_features(tile))
+
+    if not tile_features:
+
+        return get_32_features(img_bgr[32:64, 32:64])
+
+    return np.max(np.array(tile_features), axis=0)
+
+
+
+# --- 2. 모델 및 자산 로드 ---
+
 @st.cache_resource
+
 def load_assets():
-    try:
-        model = joblib.load('finals_tuned_xgboost_20feats.pkl') 
-        scaler = joblib.load('scaler_20feats.pkl')
-        return model, scaler
-    except Exception as e:
-        st.error(f"모델 파일을 찾을 수 없습니다: {e}")
-        return None, None
 
-model, scaler = load_assets()
+    model = joblib.load('final_rf_model.pkl')
 
-# --- 2. 핵심 특징 추출 함수 (학습 환경과 100% 동기화) ---
-def extract_20_features(img_array):
-    # A. PIL(RGB) -> OpenCV(BGR) 변환 (학습 시 cv2.imread 로직 재현)
-    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    
-    # B. 중앙 32x32 패치 추출 (학습 시 img[32:64, 32:64] 고정 좌표 재현)
-    h, w, _ = img_bgr.shape
-    if h >= 64 and w >= 64:
-        center_bgr = img_bgr[32:64, 32:64]
-    else:
-        # 이미지가 64px 미만일 경우 중앙 크롭으로 대체
-        center_bgr = img_bgr[max(0,h//2-16):h//2+16, max(0,w//2-16):w//2+16]
-    
-    # C. 전처리용 이미지 생성
-    gray = cv2.cvtColor(center_bgr, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(center_bgr, cv2.COLOR_BGR2HSV)
-    
-    features = {}
-    
-    # [색상 특징 - BGR 기준]
-    features['H_mean'] = np.mean(hsv[:,:,0])
-    features['S_mean'] = np.mean(hsv[:,:,1])
-    features['V_mean'] = np.mean(hsv[:,:,2])
-    features['G_mean'] = np.mean(center_bgr[:,:,1]) # BGR 중 G
-    features['B_mean'] = np.mean(center_bgr[:,:,0]) # BGR 중 B
-    features['Color_Variance'] = np.var(center_bgr)
-    
-    # [질감 특징 (GLCM)] - 거리 1, 4개 각도
-    glcm = graycomatrix(gray, distances=[1], 
-                        angles=[0, np.pi/4, np.pi/2, 3*np.pi/4], 
-                        levels=256, symmetric=True, normed=True)
-    
-    # 특정 각도별 특징 (Contrast & Homogeneity)
-    features['Contrast_0'] = graycoprops(glcm, 'contrast')[0, 0]
-    features['Contrast_45'] = graycoprops(glcm, 'contrast')[0, 1]
-    features['Contrast_135'] = graycoprops(glcm, 'contrast')[0, 3]
-    features['Homogeneity_45'] = graycoprops(glcm, 'homogeneity')[0, 1]
-    features['Homogeneity_90'] = graycoprops(glcm, 'homogeneity')[0, 2]
-    features['Homogeneity_135'] = graycoprops(glcm, 'homogeneity')[0, 3]
-    
-    # 평균 질감 특징
-    features['Correlation_avg'] = np.mean(graycoprops(glcm, 'correlation'))
-    features['Energy_avg'] = np.mean(graycoprops(glcm, 'energy'))
-    features['ASM_avg'] = np.mean(graycoprops(glcm, 'ASM'))
-    features['Entropy_avg'] = -np.sum(glcm * np.log2(glcm + 1e-10))
-    
-    # [추가 특징]
-    features['Gray_Mean_Center'] = np.mean(gray) 
-    features['Texture_Complexity'] = np.std(graycoprops(glcm, 'contrast'))
-    features['Uniformity_Score'] = np.mean(graycoprops(glcm, 'homogeneity'))
-    features['Edge_Density'] = np.mean(cv2.Canny(gray, 100, 200)) / 255.0
+    scaler = joblib.load('scaler.pkl')
 
-    # D. FEATURE_ORDER에 맞춰 리스트 생성
-    ordered_values = [features.get(name, 0.0) for name in FEATURE_ORDER]
-    return np.array(ordered_values).reshape(1, -1)
+    selected_indices = joblib.load('selected_features.pkl') # [9, 17, 18, 20, 26]
 
-# --- 3. 메인 UI 화면 구성 ---
-st.title("🔬 암 진단 AI 병리 리포트")
-st.info("이미지를 업로드하면 AI가 [32:64, 32:64] 영역을 분석하여 암 조직 여부를 판독합니다.")
-
-uploaded_file = st.file_uploader("조직 이미지(TIF/PNG/JPG) 업로드", type=['tif', 'tiff', 'png', 'jpg'])
-
-if uploaded_file and model is not None:
-    # 이미지 로딩 및 RGB 보장
-    image = Image.open(uploaded_file).convert("RGB")
-    img_array = np.array(image)
     
-    # 상단 결과 레이아웃
-    col1, col2 = st.columns([1, 1.2])
+
+    # 특징 이름 매핑 (사용자 로직 순서 기준)
+
+    feature_names_all = [
+
+        "R_mean", "G_mean", "B_mean", "R_std", "G_std", "B_std",
+
+        "H_mean", "S_mean", "V_mean", "H_std", "S_std", "V_std",
+
+        "L_mean", "A_mean", "B_mean", "L_std", "A_std", "B_std",
+
+        "GLCM_Contrast", "GLCM_Homogeneity", "GLCM_Energy", "GLCM_Correlation",
+
+        "LBP_0", "LBP_1", "LBP_2", "LBP_3", "LBP_4", "LBP_5", "LBP_6", "LBP_7", "LBP_8", "LBP_9"
+
+    ]
+
+    return model, scaler, selected_indices, feature_names_all
+
+
+
+# --- 3. UI 구성 ---
+
+st.set_page_config(page_title="Cancer AI Analysis", page_icon="🔬", layout="wide")
+
+
+
+st.title("🔬 암 조직 병리 슬라이드 정밀 분석")
+
+st.markdown("---")
+
+
+
+try:
+
+    model, scaler, selected_indices, feature_names_all = load_assets()
+
+    st.sidebar.success("✅ AI 엔진 로드 완료")
+
+except Exception as e:
+
+    st.sidebar.error(f"❌ 파일 로드 실패: {e}")
+
+    st.stop()
+
+
+
+uploaded_file = st.file_uploader("96x96 조직 이미지를 업로드하세요.", type=['tif', 'png', 'jpg'])
+
+
+
+if uploaded_file is not None:
+
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+
+    img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
     
+
+    col1, col2 = st.columns([1, 1.5])
+
+    
+
     with col1:
-        st.subheader("🖼️ 분석 이미지")
-        st.image(image, caption="Uploaded Image", use_container_width=True)
+
+        st.image(img_rgb, caption="업로드 이미지", use_container_width=True)
+
         
-        # 크롭 영역 시각화
-        h, w = img_array.shape[:2]
-        if h >= 64 and w >= 64:
-            img_viz = img_array.copy()
-            cv2.rectangle(img_viz, (32, 32), (64, 64), (255, 0, 0), 2)
-            st.image(img_viz, caption="🔴 분석 영역 표시 [32:64, 32:64]", use_container_width=True)
+
+        # 특징 추출 및 예측
+
+        features_32 = extract_logic_96x96(img_bgr)
+
+        features_5 = features_32[selected_indices].reshape(1, -1)
+
+        features_scaled = scaler.transform(features_5)[0]
+
+        prob = model.predict_proba(features_5)[0][1] # 스케일링 전/후는 모델 설정에 맞게 확인
+
+        threshold = 0.4380
+
+        
 
     with col2:
-        # 예측 수행
-        with st.spinner('분석 중...'):
-            extracted_data = extract_20_features(img_array)
-            scaled_data = scaler.transform(extracted_data)
-            prediction = model.predict(scaled_data)[0]
-            prob = model.predict_proba(scaled_data)[0][1]
 
-        st.subheader("📋 판독 결과")
-        if prediction == 1:
-            st.error(f"### 🚨 암 조직 가능성 높음 ({prob*100:.2f}%)")
-            st.progress(float(prob))
-            st.warning("주의: 본 결과는 AI 보조 지표이며, 전문의의 최종 진단이 필요합니다.")
+        # 가우지 차트 (확률 시각화)
+
+        fig_gauge = go.Figure(go.Indicator(
+
+            mode = "gauge+number",
+
+            value = prob * 100,
+
+            domain = {'x': [0, 1], 'y': [0, 1]},
+
+            title = {'text': "암 발생 위험도 (%)", 'font': {'size': 24}},
+
+            gauge = {
+
+                'axis': {'range': [None, 100], 'tickwidth': 1},
+
+                'bar': {'color': "darkblue"},
+
+                'bgcolor': "white",
+
+                'borderwidth': 2,
+
+                'bordercolor': "gray",
+
+                'steps': [
+
+                    {'range': [0, threshold*100], 'color': 'lightgreen'},
+
+                    {'range': [threshold*100, 100], 'color': 'salmon'}],
+
+                'threshold': {
+
+                    'line': {'color': "red", 'width': 4},
+
+                    'thickness': 0.75,
+
+                    'value': threshold * 100}
+
+            }
+
+        ))
+
+        fig_gauge.update_layout(height=350, margin=dict(l=20, r=20, t=50, b=20))
+
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+
+
+        if prob > threshold:
+
+            st.error(f"### 🚨 판독 결과: 암 조직 의심 (위험군)")
+
         else:
-            st.success(f"### ✅ 정상 조직 가능성 높음 ({(1-prob)*100:.2f}%)")
-            st.progress(float(1-prob))
-            st.write("조직의 특징이 정상 범주 내에 있습니다.")
 
-    st.divider()
+            st.success(f"### ✅ 판독 결과: 정상 조직 가능성 높음")
+
+
+
+    st.markdown("---")
+
     
-    # --- 4. 하단 상세 분석 (Explainability) ---
-    st.header("📊 AI 판단 근거 (Model Explainability)")
+
+    # 하단 상세 그래프 영역
+
+    st.subheader("📊 핵심 특징별 수치 분석")
+
     
-    tab1, tab2, tab3 = st.tabs(["✨ 특징 중요도", "🧪 모델 신뢰도", "📝 상세 수치"])
+
+    # 막대 그래프 데이터 준비
+
+    selected_names = [feature_names_all[i] for i in selected_indices]
+
     
-    with tab1:
-        st.write("모델이 판독 시 가장 중요하게 고려한 TOP 10 요인입니다.")
-        importances = model.feature_importances_
-        fi_df = pd.DataFrame({'Feature': FEATURE_ORDER, 'Importance': importances})
-        fi_df = fi_df.sort_values('Importance', ascending=False).head(10)
-        
-        fig, ax = plt.subplots(figsize=(8, 4))
-        sns.barplot(data=fi_df, x='Importance', y='Feature', palette='viridis', ax=ax)
-        plt.title("Feature Importance (Top 10)")
-        st.pyplot(fig)
 
-    with tab2:
-        st.write("학습 시 검증 데이터를 통한 모델의 정확도 지표입니다.")
-        c1, c2, c3 = st.columns([1, 1.5, 1])
-        with c2:
-            cm_data = [[19463, 1537], [1269, 19731]] 
-            fig_cm, ax_cm = plt.subplots(figsize=(4, 3)) 
-            sns.heatmap(cm_data, annot=True, fmt='d', cmap='RdPu', 
-                        xticklabels=['Normal', 'Cancer'], yticklabels=['Normal', 'Cancer'],
-                        annot_kws={"size": 10})
-            plt.xlabel('Predicted', fontsize=9)
-            plt.ylabel('Actual', fontsize=9)
-            st.pyplot(fig_cm)
-        st.info("AUC Score: 0.9763 | Precision: 0.93 | Recall: 0.94")
+    fig_bar = go.Figure(data=[
 
-    with tab3:
-        st.write("이미지 [32:64, 32:64] 영역에서 추출된 20개 특징의 값입니다.")
-        df_display = pd.DataFrame(extracted_data, columns=FEATURE_ORDER)
-        st.dataframe(df_display.T.rename(columns={0: "수치"}), use_container_width=True)
+        go.Bar(name='추출된 수치', x=selected_names, y=features_scaled, marker_color='teal')
 
-else:
-    if model is None:
-        st.warning("모델 파일(.pkl)이 로드되지 않았습니다. 파일명을 확인해 주세요.")
+    ])
+
+    fig_bar.update_layout(
+
+        title="선택된 특징의 스케일링된 수치 (VIF 최적화 결과)",
+
+        xaxis_title="핵심 특징",
+
+        yaxis_title="Scaled Value",
+
+        height=400
+
+    )
+
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+
+
+    with st.expander("💡 그래프 해석 가이드"):
+
+        st.write(f"1. **위험도 게이지**: 빨간색 경계선({threshold*100}%)을 넘으면 암으로 분류합니다.")
+
+        st.write(f"2. **특징 수치**: 현재 이미지에서 추출된 {selected_names} 값들이 모델 판단의 근거가 됩니다.")
+
+        st.write(f"3. **현재 확률값**: {prob:.4f} (임계값 대비 매우 {'낮음' if prob < threshold else '높음'})")
+
+    with st.expander("💡 그래프 및 특징 상세 설명"):
+
+        st.write("AI가 암을 판독할 때 가장 중요하게 본 5가지 단서입니다:")
+
+        st.write("- **H_std**: 색상의 다양성 (암세포 핵의 불규칙한 염색 정도)")
+
+        st.write("- **B_std**: 색 농도의 변화량 (조직 내 염색의 불균형함)")
+
+        st.write("- **Contrast**: 조직의 거친 정도 (인접 세포 간의 급격한 변화)")
+
+        st.write("- **Energy**: 질감의 규칙성 (정상의 매끄러움 vs 암의 복잡함)")
+
+        st.write("- **LBP_4**: 미세 형태 패턴 (암세포 특유의 기하학적 지문)")
+
+        st.info(f"현재 업로드된 이미지의 예측 확률은 **{prob:.4f}**이며, 기준점({threshold}) 대비 분석된 결과입니다.")
+
+st.caption("⚠️ 본 시스템은 연구용 모델입니다.")
